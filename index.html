@@ -1,0 +1,1314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#191B1F">
+<title>VFX Bid Sheet</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #191B1F; }
+  #root { min-height: 100vh; }
+  .boot { color: #6B7280; font-family: ui-monospace, Menlo, monospace; letter-spacing: 2px; padding: 48px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="root"><div class="boot">Loading bid sheet…</div></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js" crossorigin></script>
+
+<script>
+// ------------------------------------------------------------------
+// Storage shim — IndexedDB behind the same tiny async API the app uses.
+// Chosen over localStorage because thumbnails are stored inline as data
+// URLs; localStorage caps out around 5MB, IndexedDB runs to hundreds.
+// ------------------------------------------------------------------
+(function () {
+  const DB = "vfx-bid-sheet", STORE = "kv";
+  let dbp = null;
+
+  function open() {
+    if (dbp) return dbp;
+    dbp = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return dbp;
+  }
+
+  function tx(mode, fn) {
+    return open().then(db => new Promise((resolve, reject) => {
+      const t = db.transaction(STORE, mode);
+      const req = fn(t.objectStore(STORE));
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    }));
+  }
+
+  window.storage = {
+    get: (key) => tx("readonly", s => s.get(key))
+      .then(value => (value === undefined ? null : { key, value })),
+    set: (key, value) => tx("readwrite", s => s.put(value, key))
+      .then(() => ({ key, value })),
+    delete: (key) => tx("readwrite", s => s.delete(key))
+      .then(() => ({ key, deleted: true })),
+    list: (prefix = "") => tx("readonly", s => s.getAllKeys())
+      .then(keys => ({ keys: keys.filter(k => String(k).startsWith(prefix)), prefix })),
+  };
+})();
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ------------------------------------------------------------------
+// VFX Bid Sheet v3
+// Assets + Shots with independent discipline columns, timecode entry,
+// status, complexity multipliers, contingency, CSV export, multi-bid save
+// ------------------------------------------------------------------
+
+const ASSET_COLORS = ["#6BC5C9", "#A78BDB", "#8FBF6B", "#D9C55B", "#C97BB8", "#5B9BD5"];
+const SHOT_COLORS = ["#5B9BD5", "#E8A33D", "#8FBF6B", "#C97BB8", "#D96B5B", "#6BC5C9", "#A78BDB", "#D9C55B"];
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+const DEFAULT_ASSET_DISCS = [
+  { id: "a1", name: "Model", rate: 450 },
+  { id: "a2", name: "Texture / Lookdev", rate: 450 },
+  { id: "a3", name: "Rig", rate: 475 },
+];
+const DEFAULT_SHOT_DISCS = [
+  { id: "d1", name: "Roto / Prep", rate: 350 },
+  { id: "d2", name: "Comp", rate: 450 },
+  { id: "d3", name: "CG / Lighting", rate: 500 },
+  { id: "d4", name: "FX", rate: 500 },
+  { id: "d5", name: "DMP", rate: 450 },
+];
+
+const newRow = (kind, code) => ({
+  id: uid(), code, desc: "", thumb: null, tags: [], days: {},
+  frames: 0, tcIn: 0, status: "bid", mult: 1, qty: 1,
+});
+
+const DEFAULT_ASSETS = [
+  { ...newRow("asset", "AST_VEHICLE"), desc: "Hero vehicle — model, texture, lookdev", tags: ["cg", "hero"], days: { a1: 6, a2: 5, a3: 3 } },
+  { ...newRow("asset", "AST_ENV_STREET"), desc: "Street environment extension", tags: ["cg", "env"], days: { a1: 8, a2: 4 } },
+];
+const DEFAULT_SHOTS = [
+  { ...newRow("shot", "SH_010"), desc: "Establishing wide, sky replacement", tags: ["ext", "2d"], days: { d1: 1, d2: 3, d5: 2 }, frames: 120, tcIn: 90000 },
+  { ...newRow("shot", "SH_020"), desc: "Hero vehicle CG integration", tags: ["cg", "hero"], days: { d1: 2, d2: 4, d3: 6, d4: 3 }, frames: 96, tcIn: 90150, mult: 1.5 },
+  { ...newRow("shot", "SH_030"), desc: "Crowd tiling, plate cleanup", tags: ["2d", "crowd"], days: { d1: 3, d2: 3 }, frames: 150, tcIn: 90275 },
+];
+
+const INDEX_KEY = "vfx-bid:index";
+const PROJ_KEY = (id) => `vfx-bid:proj:${id}`;
+const LEGACY_KEY = "vfx-bid:state";
+
+const STATUS = [
+  { id: "bid", label: "Bid", color: "#E8A33D" },
+  { id: "awarded", label: "Awarded", color: "#8FBF6B" },
+  { id: "hold", label: "On hold", color: "#8B919C" },
+  { id: "omit", label: "Omit", color: "#D96B5B" },
+];
+const MULTS = [
+  { v: 0.5, label: "0.5×" }, { v: 0.75, label: "0.75×" }, { v: 1, label: "1×" },
+  { v: 1.25, label: "1.25×" }, { v: 1.5, label: "1.5×" }, { v: 2, label: "2×" },
+];
+
+const framesToTC = (frames, fps) => {
+  if (!frames || !fps) return "00:00:00:00";
+  const r = Math.round(fps);
+  const ff = Math.floor(frames % r);
+  const totalSec = Math.floor(frames / r);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(Math.floor(totalSec / 3600))}:${p(Math.floor(totalSec / 60) % 60)}:${p(totalSec % 60)}:${p(ff)}`;
+};
+
+const parseTC = (str, fps) => {
+  const clean = str.trim();
+  if (!clean) return 0;
+  if (/^\d+$/.test(clean)) {
+    // bare number: treat 1-2 digits as seconds? No — treat as frames to stay predictable
+    return Math.max(0, parseInt(clean));
+  }
+  const parts = clean.split(/[:;.]/).map(p => parseInt(p));
+  if (parts.some(isNaN)) return null;
+  while (parts.length < 4) parts.unshift(0);
+  const [h, m, s, f] = parts.slice(-4);
+  return Math.max(0, Math.round((h * 3600 + m * 60 + s) * Math.round(fps) + f));
+};
+
+const csvEsc = (v) => {
+  const s = String(v ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+// ==================================================================
+
+function BidSheet() {
+  const [project, setProject] = useState("UNTITLED PROJECT");
+  const [client, setClient] = useState("Client / Agency");
+  const [fps, setFps] = useState(25);
+  const [contingency, setContingency] = useState(10);
+  const [supPct, setSupPct] = useState(15);
+  const [assumptions, setAssumptions] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [listModal, setListModal] = useState(null); // {target: 'asset'|'shot', text: ''}
+  const [assetDiscs, setAssetDiscs] = useState(DEFAULT_ASSET_DISCS);
+  const [shotDiscs, setShotDiscs] = useState(DEFAULT_SHOT_DISCS);
+  const [assets, setAssets] = useState(DEFAULT_ASSETS);
+  const [shots, setShots] = useState(DEFAULT_SHOTS);
+  const [showRates, setShowRates] = useState(true);
+  const [filterTags, setFilterTags] = useState([]);
+  const [status, setStatus] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [projIndex, setProjIndex] = useState([]);
+  const [currentId, setCurrentId] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const importRef = useRef(null);
+  const saveTimer = useRef(null);
+  const sumRef = useRef(null);
+  const [padBottom, setPadBottom] = useState(88);
+
+  // keep content clear of the fixed summary bar, whatever height it wraps to
+  useEffect(() => {
+    const el = sumRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setPadBottom(el.offsetHeight + 24));
+    ro.observe(el);
+    setPadBottom(el.offsetHeight + 24);
+    return () => ro.disconnect();
+  }, [loaded]);
+
+  const flash = (msg) => { setStatus(msg); setTimeout(() => setStatus(""), 1800); };
+
+  // ---------- state <-> snapshot ----------
+  const snapshot = () => ({ version: 4, project, client, fps, contingency, supPct, assumptions, assetDiscs, shotDiscs, assets, shots, showRates });
+
+  const applyState = (s) => {
+    if (!s) return;
+    setProject(s.project ?? "UNTITLED PROJECT");
+    setClient(s.client ?? "");
+    setFps(s.fps ?? 25);
+    setContingency(s.contingency ?? 10);
+    setSupPct(s.supPct ?? 15);
+    setAssumptions(s.assumptions ?? "");
+    setShowRates(s.showRates ?? true);
+    const norm = (r) => ({ frames: 0, tcIn: 0, status: "bid", mult: 1, qty: 1, tags: [], days: {}, thumb: null, ...r });
+    if (s.version >= 3 || (s.assets && s.shots)) {
+      setAssetDiscs(s.assetDiscs ?? DEFAULT_ASSET_DISCS);
+      setShotDiscs(s.shotDiscs ?? DEFAULT_SHOT_DISCS);
+      setAssets((s.assets ?? []).map(norm));
+      setShots((s.shots ?? []).map(norm));
+    } else if (s.rows) {
+      // migrate v2: shared disciplines become the shot set; assets keep their day values on it
+      setShotDiscs(s.disciplines ?? DEFAULT_SHOT_DISCS);
+      setAssetDiscs(s.disciplines ?? DEFAULT_ASSET_DISCS);
+      setAssets(s.rows.filter(r => r.kind === "asset").map(norm));
+      setShots(s.rows.filter(r => r.kind === "shot").map(norm));
+    } else if (s.shots) {
+      // migrate v1
+      setShotDiscs(s.disciplines ?? DEFAULT_SHOT_DISCS);
+      setAssetDiscs(DEFAULT_ASSET_DISCS);
+      setAssets([]);
+      setShots(s.shots.map(norm));
+    }
+  };
+
+  // ---------- multi-project storage ----------
+  useEffect(() => {
+    (async () => {
+      let index = [];
+      try {
+        const res = await window.storage.get(INDEX_KEY);
+        if (res?.value) index = JSON.parse(res.value);
+      } catch (e) { /* no index yet */ }
+
+      if (index.length === 0) {
+        // first run — check for a legacy single-slot save to migrate
+        let legacy = null;
+        try {
+          const res = await window.storage.get(LEGACY_KEY);
+          if (res?.value) legacy = JSON.parse(res.value);
+        } catch (e) { /* none */ }
+        const id = uid();
+        const name = legacy?.project ?? "UNTITLED PROJECT";
+        index = [{ id, name }];
+        try {
+          await window.storage.set(PROJ_KEY(id), JSON.stringify(legacy ?? snapshot()));
+          await window.storage.set(INDEX_KEY, JSON.stringify(index));
+        } catch (e) { /* storage unavailable */ }
+        if (legacy) applyState(legacy);
+        setProjIndex(index);
+        setCurrentId(id);
+      } else {
+        setProjIndex(index);
+        const id = index[0].id;
+        setCurrentId(id);
+        try {
+          const res = await window.storage.get(PROJ_KEY(id));
+          if (res?.value) applyState(JSON.parse(res.value));
+        } catch (e) { /* missing project blob */ }
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  const persist = async (announce) => {
+    if (!currentId) return;
+    try {
+      await window.storage.set(PROJ_KEY(currentId), JSON.stringify(snapshot()));
+      const index = projIndex.map(p => p.id === currentId ? { ...p, name: project } : p);
+      setProjIndex(index);
+      await window.storage.set(INDEX_KEY, JSON.stringify(index));
+      if (announce) flash(announce);
+    } catch (e) { flash("Save failed"); }
+  };
+
+  // debounced autosave
+  useEffect(() => {
+    if (!loaded || !currentId) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => persist("Autosaved"), 900);
+    return () => clearTimeout(saveTimer.current);
+  }, [project, client, fps, contingency, supPct, assumptions, assetDiscs, shotDiscs, assets, shots, showRates, loaded, currentId]);
+
+  const switchProject = async (id) => {
+    if (id === currentId) return;
+    clearTimeout(saveTimer.current);
+    await persist();
+    try {
+      const res = await window.storage.get(PROJ_KEY(id));
+      if (res?.value) applyState(JSON.parse(res.value));
+    } catch (e) { flash("Couldn't load bid"); return; }
+    setCurrentId(id);
+    setConfirmDel(false);
+    flash("Loaded");
+  };
+
+  const newProject = async () => {
+    clearTimeout(saveTimer.current);
+    await persist();
+    const id = uid();
+    const fresh = {
+      version: 4, project: "NEW BID", client: "", fps: 25, contingency: 10, supPct: 15, assumptions: "",
+      assetDiscs: DEFAULT_ASSET_DISCS, shotDiscs: DEFAULT_SHOT_DISCS,
+      assets: [], shots: [], showRates: true,
+    };
+    const index = [...projIndex, { id, name: "NEW BID" }];
+    try {
+      await window.storage.set(PROJ_KEY(id), JSON.stringify(fresh));
+      await window.storage.set(INDEX_KEY, JSON.stringify(index));
+    } catch (e) { flash("Save failed"); return; }
+    setProjIndex(index);
+    applyState(fresh);
+    setCurrentId(id);
+    flash("New bid");
+  };
+
+  const duplicateProject = async () => {
+    const id = uid();
+    const copy = { ...snapshot(), project: project + " COPY" };
+    const index = [...projIndex, { id, name: copy.project }];
+    try {
+      await window.storage.set(PROJ_KEY(id), JSON.stringify(copy));
+      await window.storage.set(INDEX_KEY, JSON.stringify(index));
+    } catch (e) { flash("Save failed"); return; }
+    setProjIndex(index);
+    applyState(copy);
+    setCurrentId(id);
+    flash("Duplicated");
+  };
+
+  const deleteProject = async () => {
+    if (!confirmDel) { setConfirmDel(true); return; }
+    setConfirmDel(false);
+    const index = projIndex.filter(p => p.id !== currentId);
+    try {
+      await window.storage.delete(PROJ_KEY(currentId));
+      if (index.length === 0) {
+        const id = uid();
+        const fresh = { version: 4, project: "UNTITLED PROJECT", client: "", fps: 25, contingency: 10, supPct: 15, assumptions: "", assetDiscs: DEFAULT_ASSET_DISCS, shotDiscs: DEFAULT_SHOT_DISCS, assets: [], shots: [], showRates: true };
+        await window.storage.set(PROJ_KEY(id), JSON.stringify(fresh));
+        await window.storage.set(INDEX_KEY, JSON.stringify([{ id, name: fresh.project }]));
+        setProjIndex([{ id, name: fresh.project }]);
+        applyState(fresh);
+        setCurrentId(id);
+      } else {
+        await window.storage.set(INDEX_KEY, JSON.stringify(index));
+        setProjIndex(index);
+        const res = await window.storage.get(PROJ_KEY(index[0].id));
+        if (res?.value) applyState(JSON.parse(res.value));
+        setCurrentId(index[0].id);
+      }
+      flash("Deleted");
+    } catch (e) { flash("Delete failed"); }
+  };
+
+  // ---------- import / export ----------
+  const exportJSON = () => {
+    const blob = new Blob([JSON.stringify(snapshot(), null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${project.replace(/\s+/g, "_").toLowerCase()}_bid.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    flash("Exported");
+  };
+
+  const importJSON = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try { applyState(JSON.parse(r.result)); flash("Imported"); }
+      catch { flash("Invalid file"); }
+    };
+    r.readAsText(f);
+    e.target.value = "";
+  };
+
+  const active = (r) => r.status !== "omit";
+  const rowFactor = (r) => (r.mult || 1) * (r.qty || 1);
+  const rowDaysF = (r, discs) => discs.reduce((a, d) => a + (r.days[d.id] || 0), 0) * rowFactor(r);
+  const rowCostF = (r, discs) => discs.reduce((a, d) => a + (r.days[d.id] || 0) * (d.rate || 0), 0) * rowFactor(r);
+
+  const exportCSV = () => {
+    const lines = [];
+    const block = (label, rows, discs, isShot) => {
+      lines.push(label);
+      lines.push([
+        "Code", "Description", "Tags", "Status", "Complexity",
+        ...(isShot ? ["TC In", "TC Out", "Frames"] : ["Qty"]),
+        ...discs.map(d => `${d.name} (days)`), "Days", "Cost (GBP)",
+      ].map(csvEsc).join(","));
+      rows.forEach(r => {
+        lines.push([
+          r.code, r.desc, r.tags.join(" "), r.status, (r.mult || 1) + "x",
+          ...(isShot
+            ? [framesToTC(r.tcIn, fps), framesToTC((r.tcIn || 0) + (r.frames || 0), fps), r.frames || 0]
+            : [r.qty || 1]),
+          ...discs.map(d => r.days[d.id] || 0),
+          rowDaysF(r, discs), Math.round(rowCostF(r, discs)),
+        ].map(csvEsc).join(","));
+      });
+      const act = rows.filter(active);
+      lines.push([
+        "Subtotal (excl. omitted)", "", "", "", "",
+        ...(isShot ? ["", "", act.reduce((a, r) => a + (r.frames || 0), 0)] : [""]),
+        ...discs.map(d => act.reduce((a, r) => a + (r.days[d.id] || 0) * (r.mult || 1) * (r.qty || 1), 0)),
+        act.reduce((a, r) => a + rowDaysF(r, discs), 0),
+        Math.round(act.reduce((a, r) => a + rowCostF(r, discs), 0)),
+      ].map(csvEsc).join(","));
+      lines.push("");
+    };
+    lines.push(csvEsc(project) + "," + csvEsc(client));
+    lines.push("");
+    block("ASSETS", assets, assetDiscs, false);
+    block("SHOTS", shots, shotDiscs, true);
+    const sub = totals.cost;
+    const sup = Math.round(sub * supPct / 100);
+    const cont = Math.round((sub + sup) * contingency / 100);
+    lines.push(`Subtotal,,${sub}`);
+    lines.push(`Supervision & production ${supPct}%,,${sup}`);
+    lines.push(`Contingency ${contingency}%,,${cont}`);
+    lines.push(`Bid total,,${sub + sup + cont}`);
+    if (assumptions.trim()) {
+      lines.push("");
+      lines.push("ASSUMPTIONS & EXCLUSIONS");
+      assumptions.split("\n").forEach(l => lines.push(csvEsc(l)));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${project.replace(/\s+/g, "_").toLowerCase()}_bid.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    flash("CSV exported");
+  };
+
+  // ---------- client-facing export (standalone HTML, print to PDF) ----------
+  const exportClientHTML = () => {
+    const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const sub = totals.cost;
+    const sup = Math.round(sub * supPct / 100);
+    const cont = Math.round((sub + sup) * contingency / 100);
+    const money = (n) => "£" + n.toLocaleString("en-GB", { maximumFractionDigits: 0 });
+    const rowsHTML = (rows, discs, isShot) => rows.filter(active).map(r => `
+      <tr>
+        <td class="thumb">${r.thumb ? `<img src="${r.thumb}" alt="">` : ""}</td>
+        <td><div class="code">${esc(r.code)}</div><div class="desc">${esc(r.desc)}</div></td>
+        ${isShot ? `<td class="num">${r.frames || 0} f<br><span class="tc">${framesToTC(r.frames, fps)}</span></td>` : `<td class="num">${(r.qty || 1) > 1 ? "×" + r.qty : ""}</td>`}
+        <td class="num">${fmt(rowDaysF(r, discs))}</td>
+        <td class="num">${money(Math.round(rowCostF(r, discs)))}</td>
+      </tr>`).join("");
+    const secHTML = (label, rows, discs, isShot) => {
+      const act = rows.filter(active);
+      if (!act.length) return "";
+      const d = act.reduce((a, r) => a + rowDaysF(r, discs), 0);
+      const c = Math.round(act.reduce((a, r) => a + rowCostF(r, discs), 0));
+      return `
+      <h2>${label}</h2>
+      <table>
+        <thead><tr><th></th><th>Item</th><th class="num">${isShot ? "Duration" : "Qty"}</th><th class="num">Days</th><th class="num">Cost</th></tr></thead>
+        <tbody>${rowsHTML(rows, discs, isShot)}</tbody>
+        <tfoot><tr><td></td><td>${label} subtotal</td><td></td><td class="num">${fmt(d)}</td><td class="num">${money(c)}</td></tr></tfoot>
+      </table>`;
+    };
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(project)} — VFX Bid</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1a1d21; margin: 40px auto; max-width: 860px; padding: 0 24px; font-size: 13px; }
+  header { border-bottom: 3px solid #1a1d21; padding-bottom: 12px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: 1px; }
+  .meta { color: #6b7280; font-size: 12px; }
+  h2 { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; border-bottom: 1px solid #d1d5db; padding-bottom: 4px; margin: 28px 0 8px; }
+  table { border-collapse: collapse; width: 100%; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #6b7280; padding: 6px 8px; border-bottom: 1px solid #d1d5db; }
+  td { padding: 8px; border-bottom: 1px solid #eceef1; vertical-align: middle; }
+  td.thumb { width: 84px; } td.thumb img { width: 76px; height: 44px; object-fit: cover; border-radius: 2px; display: block; }
+  .code { font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+  .desc { color: #6b7280; font-size: 12px; }
+  .num { text-align: right; font-family: ui-monospace, Menlo, monospace; white-space: nowrap; }
+  .tc { color: #9ca3af; font-size: 10px; }
+  th.num { text-align: right; }
+  tfoot td { font-weight: 700; border-top: 2px solid #1a1d21; border-bottom: none; }
+  .totals { margin-top: 28px; margin-left: auto; width: 320px; }
+  .totals td { padding: 6px 8px; }
+  .totals .grand td { font-size: 16px; font-weight: 700; border-top: 2px solid #1a1d21; border-bottom: none; }
+  .assumptions { margin-top: 32px; padding: 14px 16px; background: #f6f7f8; border-radius: 4px; }
+  .assumptions h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: #6b7280; }
+  .assumptions p { margin: 0; white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
+  footer { margin-top: 40px; color: #9ca3af; font-size: 11px; }
+  @media print { body { margin: 0 auto; } }
+</style></head><body>
+<header><h1>${esc(project)}</h1><div class="meta">${esc(client)} &nbsp;·&nbsp; VFX bid &nbsp;·&nbsp; ${new Date().toLocaleDateString("en-GB")}</div></header>
+${secHTML("Assets", assets, assetDiscs, false)}
+${secHTML("Shots", shots, shotDiscs, true)}
+<table class="totals">
+  <tr><td>Subtotal</td><td class="num">${money(sub)}</td></tr>
+  <tr><td>Supervision &amp; production (${supPct}%)</td><td class="num">${money(sup)}</td></tr>
+  <tr><td>Contingency (${contingency}%)</td><td class="num">${money(cont)}</td></tr>
+  <tr class="grand"><td>Bid total</td><td class="num">${money(sub + sup + cont)}</td></tr>
+</table>
+${assumptions.trim() ? `<div class="assumptions"><h3>Assumptions &amp; exclusions</h3><p>${esc(assumptions)}</p></div>` : ""}
+<footer>Total runtime ${framesToTC(totals.frames, fps)} at ${fps} fps · Valid 30 days from date of issue unless otherwise stated.</footer>
+</body></html>`;
+    const blob = new Blob([html], { type: "text/html" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${project.replace(/\s+/g, "_").toLowerCase()}_client_bid.html`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    flash("Client bid exported");
+  };
+
+  // ---------- paste-in shot/asset list ----------
+  const importList = () => {
+    if (!listModal) return;
+    const codes = listModal.text.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+    if (!codes.length) { setListModal(null); return; }
+    const setter = listModal.target === "asset" ? setAssets : setShots;
+    setter(prev => {
+      const existing = new Set(prev.map(r => r.code.toUpperCase()));
+      const fresh = codes
+        .filter(c => !existing.has(c.toUpperCase()))
+        .map(c => ({ id: uid(), code: c, desc: "", thumb: null, tags: [], days: {}, frames: 0, tcIn: 0, status: "bid", mult: 1, qty: 1 }));
+      return [...prev, ...fresh];
+    });
+    flash(`${codes.length} rows added`);
+    setListModal(null);
+  };
+
+  // ---------- tags ----------
+  const allTags = useMemo(() => {
+    const t = new Set();
+    [...assets, ...shots].forEach(r => r.tags.forEach(x => t.add(x)));
+    return [...t].sort();
+  }, [assets, shots]);
+
+  const toggleFilter = (tag) =>
+    setFilterTags(filterTags.includes(tag) ? filterTags.filter(t => t !== tag) : [...filterTags, tag]);
+
+  // ---------- totals ----------
+  const totals = useMemo(() => {
+    const sum = (rows, discs, fn) => rows.filter(active).reduce((a, r) => a + fn(r, discs), 0);
+    const assetDays = sum(assets, assetDiscs, rowDaysF);
+    const shotDays = sum(shots, shotDiscs, rowDaysF);
+    const assetCost = sum(assets, assetDiscs, rowCostF);
+    const shotCost = sum(shots, shotDiscs, rowCostF);
+    const awarded = [...assets.map(r => [r, assetDiscs]), ...shots.map(r => [r, shotDiscs])]
+      .filter(([r]) => r.status === "awarded")
+      .reduce((a, [r, d]) => a + rowCostF(r, d), 0);
+    return {
+      assetDays, shotDays, days: assetDays + shotDays,
+      cost: Math.round(assetCost + shotCost),
+      awarded: Math.round(awarded),
+      frames: shots.filter(active).reduce((a, r) => a + (r.frames || 0), 0),
+    };
+  }, [assets, shots, assetDiscs, shotDiscs]);
+
+  const fmt = (n) => n.toLocaleString("en-GB", { maximumFractionDigits: 1 });
+  const gbp = (n) => "£" + n.toLocaleString("en-GB", { maximumFractionDigits: 0 });
+  const supAmt = Math.round(totals.cost * supPct / 100);
+  const contAmt = Math.round((totals.cost + supAmt) * contingency / 100);
+  const bidTotal = totals.cost + supAmt + contAmt;
+
+  if (!loaded) return <div className="bs-root"><style>{CSS}</style><div className="bs-loading">Loading bid…</div></div>;
+
+  return (
+    <div className="bs-root" style={{ paddingBottom: padBottom }}>
+      <style>{CSS}</style>
+      <input ref={importRef} type="file" accept=".json" style={{ display: "none" }} onChange={importJSON} />
+
+      {/* header */}
+      <header className="bs-head">
+        <div className="bs-slate">
+          <span className="bs-slate-dot" />
+          <span className="bs-slate-label">BID SHEET</span>
+        </div>
+        <div className="bs-titles">
+          <input className="bs-project" value={project} onChange={e => setProject(e.target.value)} spellCheck={false} />
+          <input className="bs-client" value={client} onChange={e => setClient(e.target.value)} spellCheck={false} />
+        </div>
+        <span className="bs-status">{status}</span>
+      </header>
+
+      {/* toolbar */}
+      <div className="bs-toolbar">
+        <div className="bs-group">
+          <span className="bs-group-label">Bid</span>
+          <select value={currentId ?? ""} onChange={e => switchProject(e.target.value)} title="Saved bids">
+            {projIndex.map(p => <option key={p.id} value={p.id}>{p.id === currentId ? project : p.name}</option>)}
+          </select>
+          <button onClick={newProject} title="New bid">+</button>
+          <button onClick={duplicateProject} title="Duplicate this bid">⧉</button>
+          <button className={confirmDel ? "bs-danger" : ""} onClick={deleteProject}
+                  onBlur={() => setConfirmDel(false)} title="Delete this bid">
+            {confirmDel ? "Delete?" : "×"}
+          </button>
+        </div>
+        <div className="bs-group">
+          <select value={fps} onChange={e => setFps(parseFloat(e.target.value))} title="Project frame rate">
+            {[23.976, 24, 25, 30, 50, 60].map(f => <option key={f} value={f}>{f} fps</option>)}
+          </select>
+        </div>
+        <div className="bs-menu-wrap">
+          <div className="bs-group">
+            <button onClick={() => setMenuOpen(!menuOpen)} aria-expanded={menuOpen}>File ▾</button>
+          </div>
+          {menuOpen && <>
+            <div className="bs-menu-backdrop" onClick={() => setMenuOpen(false)} />
+            <div className="bs-menu">
+              <button onClick={() => { persist("Saved"); setMenuOpen(false); }}>Save now</button>
+              <div className="bs-menu-div" />
+              <button onClick={() => { exportClientHTML(); setMenuOpen(false); }}>Client bid (HTML / print to PDF)</button>
+              <button onClick={() => { exportCSV(); setMenuOpen(false); }}>Working sheet (CSV)</button>
+              <button onClick={() => { exportJSON(); setMenuOpen(false); }}>Backup (JSON)</button>
+              <div className="bs-menu-div" />
+              <button onClick={() => { importRef.current?.click(); setMenuOpen(false); }}>Import backup (JSON)…</button>
+              <button onClick={() => { setListModal({ target: "shot", text: "" }); setMenuOpen(false); }}>Paste shot / asset list…</button>
+            </div>
+          </>}
+        </div>
+        <div className="bs-group">
+          <button onClick={() => setShowRates(!showRates)}>{showRates ? "Hide costs" : "Show costs"}</button>
+        </div>
+      </div>
+
+      {/* tag filter strip */}
+      <div className="bs-filter">
+        <span className="bs-filter-label">Filter by tag</span>
+        {allTags.length === 0 && <span className="bs-filter-empty">No tags yet — add them per row below</span>}
+        {allTags.map(t => (
+          <button key={t} className={"bs-tagchip" + (filterTags.includes(t) ? " on" : "")} onClick={() => toggleFilter(t)}>{t}</button>
+        ))}
+        {filterTags.length > 0 && <button className="bs-clear" onClick={() => setFilterTags([])}>Clear</button>}
+      </div>
+
+      <Section
+        label="ASSETS" kind="asset" codePrefix="AST_"
+        rows={assets} setRows={setAssets}
+        discs={assetDiscs} setDiscs={setAssetDiscs}
+        colors={ASSET_COLORS}
+        showFrames={false} showQty={true} fps={fps} showRates={showRates}
+        filterTags={filterTags} fmt={fmt} gbp={gbp}
+        rowDaysF={rowDaysF} rowCostF={rowCostF} active={active}
+      />
+
+      <Section
+        label="SHOTS" kind="shot" codePrefix="SH_"
+        rows={shots} setRows={setShots}
+        discs={shotDiscs} setDiscs={setShotDiscs}
+        colors={SHOT_COLORS}
+        showFrames={true} showQty={false} fps={fps} showRates={showRates}
+        filterTags={filterTags} fmt={fmt} gbp={gbp}
+        rowDaysF={rowDaysF} rowCostF={rowCostF} active={active}
+      />
+
+      {/* assumptions & exclusions */}
+      <div className="bs-scroll">
+        <div className="bs-section-bar">
+          <span className="bs-section-label bs-assump-label">ASSUMPTIONS &amp; EXCLUSIONS</span>
+          <span className="bs-section-meta">included in client bid &amp; CSV exports</span>
+        </div>
+        <textarea className="bs-assump" rows={4} value={assumptions}
+                  placeholder={"e.g.\nAssumes graded plates supplied at delivery resolution.\nTwo rounds of notes per shot included; further revisions quoted separately.\nExcludes retimes, stereo conversion and mastering."}
+                  onChange={e => setAssumptions(e.target.value)} spellCheck={false} />
+      </div>
+
+      {/* paste-in list modal */}
+      {listModal && (
+        <div className="bs-modal-backdrop" onClick={() => setListModal(null)}>
+          <div className="bs-modal" onClick={e => e.stopPropagation()}>
+            <h3>Paste a list</h3>
+            <p>One code per line (commas work too). Duplicates of existing codes are skipped.</p>
+            <div className="bs-modal-target">
+              <span>Add to</span>
+              {["asset", "shot"].map(k => (
+                <button key={k} className={listModal.target === k ? "on" : ""}
+                        onClick={() => setListModal({ ...listModal, target: k })}>
+                  {k === "asset" ? "Assets" : "Shots"}
+                </button>
+              ))}
+            </div>
+            <textarea autoFocus rows={8} value={listModal.text}
+                      placeholder={"SH_010\nSH_020\nSH_030"}
+                      onChange={e => setListModal({ ...listModal, text: e.target.value })} spellCheck={false} />
+            <div className="bs-modal-actions">
+              <button onClick={() => setListModal(null)}>Cancel</button>
+              <button className="bs-primary" onClick={importList}>Add rows</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* totals slate */}
+      <footer className="bs-summary" ref={sumRef}>
+        <div><span className="bs-sum-label">Assets</span><span className="bs-sum-val">{fmt(totals.assetDays)}<span className="bs-sum-unit">d</span></span></div>
+        <div><span className="bs-sum-label">Shots</span><span className="bs-sum-val">{fmt(totals.shotDays)}<span className="bs-sum-unit">d</span></span></div>
+        <div><span className="bs-sum-label">Total</span><span className="bs-sum-val">{fmt(totals.days)}<span className="bs-sum-unit">d</span></span></div>
+        <div><span className="bs-sum-label">Runtime</span><span className="bs-sum-val bs-sum-tc">{framesToTC(totals.frames, fps)}</span></div>
+        {showRates && <>
+          <div><span className="bs-sum-label">Subtotal</span><span className="bs-sum-val bs-sum-sub">{gbp(totals.cost)}</span></div>
+          <div className="bs-cont">
+            <span className="bs-sum-label">Sup</span>
+            <input type="number" min="0" max="100" value={supPct}
+                   title="Supervision & production management, % on top of artist days"
+                   onChange={e => setSupPct(Math.max(0, parseFloat(e.target.value) || 0))} />%
+            <span className="bs-cont-amt">+{gbp(supAmt)}</span>
+          </div>
+          <div className="bs-cont">
+            <span className="bs-sum-label">Cont</span>
+            <input type="number" min="0" max="100" value={contingency}
+                   onChange={e => setContingency(Math.max(0, parseFloat(e.target.value) || 0))} />%
+            <span className="bs-cont-amt">+{gbp(contAmt)}</span>
+          </div>
+          <div><span className="bs-sum-label">Bid total</span><span className="bs-sum-val bs-sum-cost">{gbp(bidTotal)}</span></div>
+          {totals.awarded > 0 && <div><span className="bs-sum-label">Awarded</span><span className="bs-sum-val bs-sum-awarded">{gbp(totals.awarded)}</span></div>}
+        </>}
+      </footer>
+    </div>
+  );
+}
+
+// ==================================================================
+// Section — one table with its own discipline columns, sort & drag
+// ==================================================================
+
+function Section({ label, kind, codePrefix, rows, setRows, discs, setDiscs, colors,
+                   showFrames, showQty, fps, showRates, filterTags, fmt, gbp, rowDaysF, rowCostF, active }) {
+  const [sortKey, setSortKey] = useState(null);
+  const [sortDir, setSortDir] = useState(1);
+  const [open, setOpen] = useState(true);
+  const [dragRow, setDragRow] = useState(null);
+  const [dragCol, setDragCol] = useState(null);
+  const [overRow, setOverRow] = useState(null);
+  const [overCol, setOverCol] = useState(null);
+  const fileRef = useRef(null);
+  const bulkRef = useRef(null);
+  const thumbTarget = useRef(null);
+
+  const makeThumb = (file) => new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      const scale = Math.min(1, 200 / img.width);
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL("image/jpeg", 0.72));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+
+  // bulk import: one row per image, code from filename; matching codes get the thumb attached instead
+  const onBulkImages = async (e) => {
+    const files = [...(e.target.files || [])];
+    e.target.value = "";
+    if (!files.length) return;
+    const loaded = [];
+    for (const f of files) {
+      const thumb = await makeThumb(f);
+      if (thumb) loaded.push({ code: f.name.replace(/\.[^.]+$/, ""), thumb });
+    }
+    if (!loaded.length) return;
+    setRows(prev => {
+      const list = [...prev];
+      loaded.forEach(({ code, thumb }) => {
+        const i = list.findIndex(r => r.code.toUpperCase() === code.toUpperCase());
+        if (i >= 0) list[i] = { ...list[i], thumb };
+        else list.push({ id: uid(), code, desc: "", thumb, tags: [], days: {}, frames: 0, tcIn: 0, status: "bid", mult: 1, qty: 1 });
+      });
+      return list;
+    });
+    setOpen(true);
+  };
+
+  const discColor = (i) => colors[i % colors.length];
+
+  // ---------- rows ----------
+  const addRow = () => {
+    const n = rows.length + 1;
+    const code = kind === "shot" ? `${codePrefix}${String(n * 10).padStart(3, "0")}` : `${codePrefix}${String(n).padStart(2, "0")}`;
+    setRows([...rows, { id: uid(), code, desc: "", thumb: null, tags: [], days: {}, frames: 0, tcIn: 0, status: "bid", mult: 1, qty: 1 }]);
+  };
+  const updateRow = (id, patch) => setRows(rows.map(r => r.id === id ? { ...r, ...patch } : r));
+  const removeRow = (id) => setRows(rows.filter(r => r.id !== id));
+  const duplicateRow = (id) => {
+    const i = rows.findIndex(r => r.id === id);
+    const copy = { ...rows[i], id: uid(), code: rows[i].code + "_A", days: { ...rows[i].days }, tags: [...rows[i].tags] };
+    setRows([...rows.slice(0, i + 1), copy, ...rows.slice(i + 1)]);
+  };
+  const setDays = (rowId, discId, val) => {
+    const v = val === "" ? undefined : Math.max(0, parseFloat(val) || 0);
+    setRows(rows.map(r => {
+      if (r.id !== rowId) return r;
+      const days = { ...r.days };
+      if (v === undefined) delete days[discId]; else days[discId] = v;
+      return { ...r, days };
+    }));
+  };
+
+  // ---------- thumbnails ----------
+  const pickThumb = (rowId) => { thumbTarget.current = rowId; fileRef.current?.click(); };
+  const onThumbFile = async (e) => {
+    const f = e.target.files?.[0];
+    const target = thumbTarget.current;
+    e.target.value = "";
+    if (!f || !target) return;
+    const thumb = await makeThumb(f);
+    if (thumb) updateRow(target, { thumb });
+  };
+
+  // ---------- disciplines ----------
+  const addDiscipline = () => setDiscs([...discs, { id: uid(), name: "New Discipline", rate: 450 }]);
+  const updateDisc = (id, patch) => setDiscs(discs.map(d => d.id === id ? { ...d, ...patch } : d));
+  const removeDisc = (id) => {
+    setDiscs(discs.filter(d => d.id !== id));
+    setRows(rows.map(r => { const days = { ...r.days }; delete days[id]; return { ...r, days }; }));
+    if (sortKey === id) setSortKey(null);
+  };
+
+  // ---------- sort / filter ----------
+  const visible = useMemo(() => {
+    let list = rows;
+    if (filterTags.length) list = list.filter(r => filterTags.every(t => r.tags.includes(t)));
+    if (!sortKey) return list;
+    return [...list].sort((a, b) => {
+      let va, vb;
+      if (sortKey === "code") { va = a.code; vb = b.code; }
+      else if (sortKey === "total") { va = rowDaysF(a, discs); vb = rowDaysF(b, discs); }
+      else if (sortKey === "tags") { va = a.tags.join(","); vb = b.tags.join(","); }
+      else if (sortKey === "frames") { va = a.frames || 0; vb = b.frames || 0; }
+      else if (sortKey === "status") { va = a.status; vb = b.status; }
+      else { va = a.days[sortKey] || 0; vb = b.days[sortKey] || 0; }
+      if (typeof va === "string") return va.localeCompare(vb) * sortDir;
+      return (va - vb) * sortDir;
+    });
+  }, [rows, filterTags, sortKey, sortDir, discs, rowDaysF]);
+
+  const setSort = (key) => {
+    if (sortKey === key) {
+      if (sortDir === 1) setSortDir(-1);
+      else { setSortKey(null); setSortDir(1); }
+    } else { setSortKey(key); setSortDir(1); }
+  };
+  const sortGlyph = (key) => sortKey === key ? (sortDir === 1 ? " ▲" : " ▼") : "";
+
+  // ---------- drag ----------
+  const onRowDrop = (targetId) => {
+    if (!dragRow || dragRow === targetId) return reset();
+    const list = [...rows];
+    const from = list.findIndex(r => r.id === dragRow);
+    const to = list.findIndex(r => r.id === targetId);
+    const [m] = list.splice(from, 1);
+    list.splice(to, 0, m);
+    setRows(list);
+    setSortKey(null);
+    reset();
+  };
+  const onColDrop = (targetId) => {
+    if (!dragCol || dragCol === targetId) return reset();
+    const list = [...discs];
+    const from = list.findIndex(d => d.id === dragCol);
+    const to = list.findIndex(d => d.id === targetId);
+    const [m] = list.splice(from, 1);
+    list.splice(to, 0, m);
+    setDiscs(list);
+    reset();
+  };
+  const reset = () => { setDragRow(null); setDragCol(null); setOverRow(null); setOverCol(null); };
+
+  // ---------- totals (active rows only) ----------
+  const act = rows.filter(active);
+  const discTotal = (dId) => act.reduce((a, r) => a + (r.days[dId] || 0) * (r.mult || 1) * (r.qty || 1), 0);
+  const secDays = act.reduce((a, r) => a + rowDaysF(r, discs), 0);
+  const secCost = act.reduce((a, r) => a + rowCostF(r, discs), 0);
+  const secFrames = act.reduce((a, r) => a + (r.frames || 0), 0);
+
+  const statusOf = (id) => STATUS.find(s => s.id === id) ?? STATUS[0];
+
+  return (
+    <div className="bs-scroll">
+      <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onThumbFile} />
+      <input ref={bulkRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={onBulkImages} />
+      <div className="bs-section-bar">
+        <button className="bs-chev" onClick={() => setOpen(!open)} title={open ? "Collapse section" : "Expand section"}
+                aria-expanded={open}>{open ? "▾" : "▸"}</button>
+        <span className="bs-section-label" onClick={() => setOpen(!open)}>{label}</span>
+        <span className="bs-section-meta">{visible.length}{visible.length !== rows.length ? `/${rows.length}` : ""} rows</span>
+        {!open && (
+          <span className="bs-collapsed-sum">
+            {fmt(secDays)} d{showRates ? ` · ${gbp(Math.round(secCost))}` : ""}
+          </span>
+        )}
+        <button className="bs-addrow" onClick={() => { setOpen(true); addRow(); }}>+ Add {kind}</button>
+        <button className="bs-addrow" onClick={() => bulkRef.current?.click()}
+                title={`Select multiple images — one ${kind} per file, named from the filename. Images whose name matches an existing code attach to that row instead.`}>
+          ⇪ Import images
+        </button>
+      </div>
+      {open && (
+      <table className="bs-table">
+        <thead>
+          <tr>
+            <th className="bs-th bs-th-grip" />
+            <th className="bs-th">Frame</th>
+            <th className="bs-th bs-sort" onClick={() => setSort("code")}>Name{sortGlyph("code")}</th>
+            {showFrames && <th className="bs-th bs-sort" onClick={() => setSort("frames")}>TC In / Out{sortGlyph("frames")}</th>}
+            <th className="bs-th bs-sort" onClick={() => setSort("tags")}>Tags{sortGlyph("tags")}</th>
+            <th className="bs-th bs-sort" onClick={() => setSort("status")}>Status{sortGlyph("status")}</th>
+            <th className="bs-th">Cx</th>
+            {showQty && <th className="bs-th" title="Quantity — number of instances or variants of this asset">Qty</th>}
+            {discs.map((d, i) => (
+              <th key={d.id}
+                  className={"bs-th bs-th-disc" + (overCol === d.id ? " over" : "")}
+                  draggable
+                  onDragStart={() => setDragCol(d.id)}
+                  onDragOver={e => { e.preventDefault(); setOverCol(d.id); }}
+                  onDragLeave={() => setOverCol(null)}
+                  onDrop={() => onColDrop(d.id)}
+                  onDragEnd={reset}
+                  style={{ borderTop: `3px solid ${discColor(i)}` }}>
+                <div className="bs-disc-name" onClick={() => setSort(d.id)} title="Click to sort, drag to reorder">
+                  <input value={d.name}
+                         onClick={e => e.stopPropagation()}
+                         onChange={e => updateDisc(d.id, { name: e.target.value })}
+                         spellCheck={false} />
+                  <span className="bs-glyph">{sortGlyph(d.id)}</span>
+                </div>
+                {showRates && (
+                  <div className="bs-rate">
+                    £<input type="number" value={d.rate} min="0"
+                            onChange={e => updateDisc(d.id, { rate: parseFloat(e.target.value) || 0 })} />/day
+                  </div>
+                )}
+                <button className="bs-x" title="Remove discipline" onClick={() => removeDisc(d.id)}>×</button>
+              </th>
+            ))}
+            <th className="bs-th bs-th-add">
+              <button className="bs-addcol" onClick={addDiscipline} title="Add discipline">+</button>
+            </th>
+            <th className="bs-th bs-sort bs-th-total" onClick={() => setSort("total")}>Days{sortGlyph("total")}</th>
+            {showRates && <th className="bs-th bs-th-total">Cost</th>}
+            <th className="bs-th" />
+          </tr>
+        </thead>
+        <tbody>
+          {visible.map(r => {
+            const st = statusOf(r.status);
+            const omitted = r.status === "omit";
+            return (
+              <tr key={r.id}
+                  className={"bs-row" + (overRow === r.id ? " over" : "") + (dragRow === r.id ? " lifting" : "") + (omitted ? " omitted" : "")}
+                  onDragOver={e => { if (dragRow) { e.preventDefault(); setOverRow(r.id); } }}
+                  onDragLeave={() => setOverRow(null)}
+                  onDrop={() => onRowDrop(r.id)}>
+                <td className="bs-cell bs-grip" draggable onDragStart={() => setDragRow(r.id)} onDragEnd={reset} title="Drag to reorder">⠿</td>
+                <td className="bs-cell bs-thumbcell">
+                  {r.thumb
+                    ? <img className="bs-thumb" src={r.thumb} alt={r.code} onClick={() => pickThumb(r.id)} title="Replace frame" />
+                    : <button className="bs-thumb-empty" onClick={() => pickThumb(r.id)}>+ frame</button>}
+                </td>
+                <td className="bs-cell bs-shotcell">
+                  <input className="bs-code" value={r.code} onChange={e => updateRow(r.id, { code: e.target.value })} spellCheck={false} />
+                  <div className="bs-desc-wrap">
+                    <input className="bs-desc" value={r.desc} placeholder="Description…" onChange={e => updateRow(r.id, { desc: e.target.value })} spellCheck={false} />
+                    {r.desc && r.desc.length > 24 && <div className="bs-desc-pop">{r.desc}</div>}
+                  </div>
+                </td>
+                {showFrames && (
+                  <td className="bs-cell bs-framecell">
+                    <FrameTCRange tcIn={r.tcIn || 0} frames={r.frames || 0} fps={fps}
+                                  onChange={patch => updateRow(r.id, patch)} />
+                  </td>
+                )}
+                <td className="bs-cell bs-tagcell">
+                  <TagEditor tags={r.tags} onChange={tags => updateRow(r.id, { tags })} />
+                </td>
+                <td className="bs-cell bs-statuscell">
+                  <select value={r.status} style={{ color: st.color, borderColor: st.color + "55" }}
+                          onChange={e => updateRow(r.id, { status: e.target.value })}>
+                    {STATUS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                  </select>
+                </td>
+                <td className="bs-cell bs-multcell">
+                  <select value={r.mult || 1} className={r.mult && r.mult !== 1 ? "hot" : ""}
+                          title="Complexity multiplier applied to this row's days and cost"
+                          onChange={e => updateRow(r.id, { mult: parseFloat(e.target.value) })}>
+                    {MULTS.map(m => <option key={m.v} value={m.v}>{m.label}</option>)}
+                  </select>
+                </td>
+                {showQty && (
+                  <td className="bs-cell bs-qtycell">
+                    <input type="number" min="1" step="1"
+                           className={r.qty && r.qty !== 1 ? "hot" : ""}
+                           value={r.qty || 1}
+                           title="Quantity — days and cost are multiplied by this"
+                           onChange={e => updateRow(r.id, { qty: Math.max(1, parseInt(e.target.value) || 1) })} />
+                  </td>
+                )}
+                {discs.map((d, i) => (
+                  <td key={d.id} className="bs-cell bs-days">
+                    <input type="number" min="0" step="0.5"
+                           value={r.days[d.id] ?? ""}
+                           placeholder="–"
+                           style={{ color: r.days[d.id] ? discColor(i) : undefined }}
+                           onChange={e => setDays(r.id, d.id, e.target.value)} />
+                  </td>
+                ))}
+                <td className="bs-cell" />
+                <td className="bs-cell bs-total">{fmt(rowDaysF(r, discs))}</td>
+                {showRates && <td className="bs-cell bs-cost">{gbp(Math.round(rowCostF(r, discs)))}</td>}
+                <td className="bs-cell bs-rowactions">
+                  <button title="Duplicate" onClick={() => duplicateRow(r.id)}>⧉</button>
+                  <button title="Delete" onClick={() => removeRow(r.id)}>×</button>
+                </td>
+              </tr>
+            );
+          })}
+          <tr className="bs-subtotal">
+            <td className="bs-cell bs-sub-label" colSpan={3}>{label.charAt(0) + label.slice(1).toLowerCase()} subtotal</td>
+            {showFrames && <td className="bs-cell bs-framecell bs-sub-frames"><span className="bs-tc">{secFrames} f · {framesToTC(secFrames, fps)}</span></td>}
+            <td className="bs-cell" colSpan={showQty ? 4 : 3} />
+            {discs.map((d, i) => (
+              <td key={d.id} className="bs-cell bs-days bs-foot-num" style={{ color: discColor(i) }}>{fmt(discTotal(d.id))}</td>
+            ))}
+            <td className="bs-cell" />
+            <td className="bs-cell bs-total">{fmt(secDays)}</td>
+            {showRates && <td className="bs-cell bs-cost">{gbp(Math.round(secCost))}</td>}
+            <td className="bs-cell" />
+          </tr>
+          <tr className="bs-addrow-tr">
+            <td className="bs-cell" colSpan={99}>
+              <button className="bs-addrow" onClick={addRow}>+ Add {kind}</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      )}
+    </div>
+  );
+}
+
+// ---------- timecode field (draft while editing, commits on blur/Enter) ----------
+function TCField({ label, value, fps, onCommit, title }) {
+  const [draft, setDraft] = useState(null); // null = not editing
+  const commit = () => {
+    if (draft === null) return;
+    const f = parseTC(draft, fps);
+    if (f !== null) onCommit(f);
+    setDraft(null);
+  };
+  return (
+    <label className="bs-tcrow" title={title}>
+      <span>{label}</span>
+      <input className="bs-tcinput"
+             value={draft ?? framesToTC(value, fps)}
+             onFocus={e => { setDraft(framesToTC(value, fps)); e.target.select(); }}
+             onChange={e => setDraft(e.target.value)}
+             onBlur={commit}
+             onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } }}
+             spellCheck={false} />
+    </label>
+  );
+}
+
+// ---------- TC in/out + frame count, all three kept in sync ----------
+function FrameTCRange({ tcIn, frames, fps, onChange }) {
+  return (
+    <div className="bs-frames">
+      <TCField label="in" value={tcIn} fps={fps}
+               title="Cut in — HH:MM:SS:FF (shorthand like 4:12 = 4s 12f works too)"
+               onCommit={f => onChange({ tcIn: f })} />
+      <TCField label="out" value={tcIn + frames} fps={fps}
+               title="Cut out (exclusive) — editing this recalculates the frame count"
+               onCommit={f => onChange({ frames: Math.max(0, f - tcIn) })} />
+      <label className="bs-tcrow">
+        <span>f</span>
+        <input type="number" min="0" value={frames || ""} placeholder="0"
+               title="Frame count — editing this moves the out point"
+               onChange={e => onChange({ frames: Math.max(0, parseInt(e.target.value) || 0) })} />
+      </label>
+    </div>
+  );
+}
+
+// ---------- tag editor ----------
+function TagEditor({ tags, onChange }) {
+  const [draft, setDraft] = useState("");
+  const commit = () => {
+    const t = draft.trim().toLowerCase();
+    if (t && !tags.includes(t)) onChange([...tags, t]);
+    setDraft("");
+  };
+  return (
+    <div className="bs-tags">
+      {tags.map(t => (
+        <span key={t} className="bs-tag">{t}<button onClick={() => onChange(tags.filter(x => x !== t))}>×</button></span>
+      ))}
+      <input value={draft}
+             placeholder="+ tag"
+             onChange={e => setDraft(e.target.value)}
+             onKeyDown={e => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); commit(); } }}
+             onBlur={commit}
+             spellCheck={false} />
+    </div>
+  );
+}
+
+// ---------- styles ----------
+const CSS = `
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+.bs-root {
+  min-height: 100vh;
+  background: #191B1F;
+  color: #DDE1E6;
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  padding-bottom: 72px;
+}
+.bs-root input, .bs-root button, .bs-root select { font-family: inherit; }
+.bs-root input:focus-visible, .bs-root button:focus-visible, .bs-root select:focus-visible { outline: 2px solid #E8A33D; outline-offset: 1px; }
+.bs-loading { padding: 48px; font-family: ui-monospace, Menlo, monospace; color: #6B7280; letter-spacing: 2px; }
+
+/* header */
+.bs-head { display: flex; align-items: center; gap: 16px; padding: 16px 24px 12px; flex-wrap: wrap; }
+.bs-slate { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid #3A3F48; border-radius: 3px; background: #14161A; }
+.bs-slate-dot { width: 8px; height: 8px; border-radius: 50%; background: #E8A33D; box-shadow: 0 0 8px #E8A33D88; }
+.bs-slate-label { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 3px; font-size: 11px; color: #E8A33D; }
+.bs-titles { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 200px; }
+.bs-project { background: none; border: none; color: #F2F4F7; font-size: 20px; font-weight: 700; letter-spacing: 1px; padding: 0; width: 100%; }
+.bs-client { background: none; border: none; color: #8B919C; font-size: 12px; padding: 0; width: 100%; }
+.bs-status { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #8FBF6B; min-width: 70px; text-align: right; }
+
+/* toolbar */
+.bs-toolbar { display: flex; align-items: stretch; gap: 10px; padding: 0 24px 12px; flex-wrap: wrap; border-bottom: 1px solid #2A2E35; }
+.bs-group { display: flex; align-items: center; background: #1D2025; border: 1px solid #2A2E35; border-radius: 4px; overflow: hidden; }
+.bs-group-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #6B7280; padding: 0 8px 0 10px; }
+.bs-group select { background: none; border: none; color: #DDE1E6; padding: 7px 6px; font-size: 12px; max-width: 150px; cursor: pointer; }
+.bs-group button { background: none; border: none; border-left: 1px solid #2A2E35; color: #A8AEB8; padding: 7px 11px; cursor: pointer; font-size: 12px; }
+.bs-group button:first-child { border-left: none; }
+.bs-group button:hover { color: #E8A33D; background: #23262C; }
+.bs-group button.bs-danger { background: #D96B5B; color: #191B1F; font-weight: 600; }
+
+/* file menu */
+.bs-menu-wrap { position: relative; }
+.bs-menu-backdrop { position: fixed; inset: 0; z-index: 40; }
+.bs-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; background: #23262C; border: 1px solid #3A3F48; border-radius: 4px; min-width: 240px; box-shadow: 0 8px 24px #000000AA; padding: 4px; display: flex; flex-direction: column; }
+.bs-menu button { background: none; border: none; color: #DDE1E6; padding: 8px 12px; text-align: left; cursor: pointer; font-size: 12px; border-radius: 3px; }
+.bs-menu button:hover { background: #2A2E35; color: #E8A33D; }
+.bs-menu-div { height: 1px; background: #33383F; margin: 4px 8px; }
+
+/* modal */
+.bs-modal-backdrop { position: fixed; inset: 0; background: #000000AA; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.bs-modal { background: #1E2128; border: 1px solid #3A3F48; border-radius: 6px; padding: 18px; width: 100%; max-width: 420px; box-shadow: 0 12px 40px #000000CC; }
+.bs-modal h3 { margin: 0 0 4px; font-size: 14px; color: #F2F4F7; }
+.bs-modal p { margin: 0 0 12px; font-size: 12px; color: #8B919C; }
+.bs-modal-target { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 11px; color: #6B7280; text-transform: uppercase; letter-spacing: 1px; }
+.bs-modal-target button { background: #1D2025; border: 1px solid #2A2E35; color: #A8AEB8; padding: 5px 14px; border-radius: 99px; cursor: pointer; font-size: 12px; }
+.bs-modal-target button.on { background: #E8A33D; border-color: #E8A33D; color: #191B1F; font-weight: 600; }
+.bs-modal textarea { width: 100%; background: #14161A; border: 1px solid #2A2E35; border-radius: 4px; color: #DDE1E6; padding: 10px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; resize: vertical; }
+.bs-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.bs-modal-actions button { background: #23262C; border: 1px solid #3A3F48; color: #DDE1E6; padding: 7px 14px; border-radius: 3px; cursor: pointer; font-size: 12px; }
+.bs-modal-actions button.bs-primary { background: #E8A33D; border-color: #E8A33D; color: #191B1F; font-weight: 600; }
+
+/* assumptions */
+.bs-assump-label { cursor: default; }
+.bs-assump { width: 100%; background: #1D2025; border: 1px solid #2A2E35; border-radius: 4px; color: #DDE1E6; padding: 12px; font-size: 12px; line-height: 1.6; resize: vertical; min-height: 84px; }
+.bs-assump::placeholder { color: #40454E; }
+.bs-assump:focus { border-color: #3A3F48; }
+
+/* filter strip */
+.bs-filter { display: flex; align-items: center; gap: 8px; padding: 12px 24px; flex-wrap: wrap; border-bottom: 1px solid #22252B; }
+.bs-filter-label { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: #6B7280; margin-right: 4px; }
+.bs-filter-empty { color: #565C66; font-size: 12px; }
+.bs-tagchip { background: #1F2228; border: 1px solid #33383F; color: #A8AEB8; padding: 4px 12px; border-radius: 99px; cursor: pointer; font-size: 12px; }
+.bs-tagchip.on { background: #E8A33D; border-color: #E8A33D; color: #191B1F; font-weight: 600; }
+.bs-clear { background: none; border: none; color: #E8A33D; cursor: pointer; font-size: 12px; text-decoration: underline; }
+
+/* section bars */
+.bs-section-bar { display: flex; align-items: center; gap: 12px; padding: 16px 0 8px; }
+.bs-chev { background: none; border: 1px solid #2A2E35; border-radius: 3px; color: #8B919C; width: 24px; height: 24px; cursor: pointer; font-size: 11px; line-height: 1; }
+.bs-chev:hover { color: #E8A33D; border-color: #E8A33D; }
+.bs-section-label { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; letter-spacing: 3px; color: #E8A33D; cursor: pointer; user-select: none; }
+.bs-section-meta { font-size: 11px; color: #6B7280; }
+.bs-collapsed-sum { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #A8AEB8; background: #1D2025; border: 1px solid #2A2E35; border-radius: 99px; padding: 3px 12px; }
+.bs-addrow { background: none; border: 1px dashed #3A3F48; color: #8B919C; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+.bs-addrow:hover { color: #E8A33D; border-color: #E8A33D; }
+.bs-addrow-tr .bs-cell { padding: 10px; border-bottom: none; }
+
+/* table */
+.bs-scroll { overflow-x: auto; padding: 0 24px; }
+.bs-table { border-collapse: collapse; width: 100%; min-width: 1100px; margin-bottom: 8px; }
+.bs-th { text-align: left; padding: 10px 10px 8px; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8B919C; border-bottom: 1px solid #2A2E35; vertical-align: bottom; position: relative; }
+.bs-sort { cursor: pointer; user-select: none; }
+.bs-sort:hover { color: #DDE1E6; }
+.bs-th-disc { cursor: grab; min-width: 92px; background: #1D2025; text-align: center; }
+.bs-th-disc.over { background: #2A2E35; }
+.bs-th-disc .bs-disc-name { display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.bs-th-disc input { background: none; border: none; color: #DDE1E6; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; width: 100%; padding: 0; cursor: text; text-align: center; }
+.bs-glyph { color: #E8A33D; }
+.bs-rate { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: #6B7280; text-transform: none; letter-spacing: 0; margin-top: 3px; text-align: center; }
+.bs-rate input { background: none; border: none; border-bottom: 1px dotted #3A3F48; color: #A8AEB8; width: 42px; font-size: 10px; padding: 0; font-family: inherit; }
+.bs-x { position: absolute; top: 2px; right: 2px; background: none; border: none; color: #565C66; cursor: pointer; font-size: 13px; padding: 2px 5px; opacity: 0; }
+.bs-th-disc:hover .bs-x { opacity: 1; }
+.bs-x:hover { color: #D96B5B; }
+.bs-addcol { background: none; border: 1px dashed #3A3F48; color: #8B919C; width: 26px; height: 26px; border-radius: 3px; cursor: pointer; font-size: 15px; }
+.bs-addcol:hover { color: #E8A33D; border-color: #E8A33D; }
+.bs-th-total { text-align: right; }
+
+.bs-row { border-bottom: 1px solid #22252B; }
+.bs-row:hover { background: #1D2025; }
+.bs-row.over { box-shadow: inset 0 2px 0 #E8A33D; }
+.bs-row.lifting { opacity: 0.4; }
+.bs-row.omitted { opacity: 0.45; }
+.bs-row.omitted .bs-code, .bs-row.omitted .bs-desc { text-decoration: line-through; }
+.bs-cell { padding: 8px 10px; vertical-align: middle; }
+.bs-grip { cursor: grab; color: #565C66; width: 24px; font-size: 14px; user-select: none; }
+.bs-grip:hover { color: #E8A33D; }
+
+.bs-thumbcell { width: 84px; }
+.bs-thumb { width: 76px; height: 44px; object-fit: cover; border-radius: 2px; border: 1px solid #33383F; cursor: pointer; display: block; }
+.bs-thumb-empty { width: 76px; height: 44px; background: #1D2025; border: 1px dashed #3A3F48; border-radius: 2px; color: #565C66; font-size: 11px; cursor: pointer; }
+.bs-thumb-empty:hover { color: #E8A33D; border-color: #E8A33D; }
+
+.bs-shotcell { min-width: 190px; }
+.bs-code { display: block; background: none; border: none; color: #F2F4F7; font-family: ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 600; width: 100%; padding: 0 0 2px; }
+.bs-desc-wrap { position: relative; }
+.bs-desc { display: block; background: none; border: none; color: #8B919C; font-size: 12px; width: 100%; padding: 0; text-overflow: ellipsis; }
+.bs-desc-pop {
+  display: none; position: absolute; left: 0; top: calc(100% + 6px); z-index: 30;
+  background: #23262C; border: 1px solid #3A3F48; border-radius: 4px;
+  padding: 8px 10px; width: max-content; max-width: 340px;
+  color: #DDE1E6; font-size: 12px; line-height: 1.45; white-space: normal;
+  box-shadow: 0 6px 18px #00000088; pointer-events: none;
+}
+.bs-desc-wrap:hover .bs-desc-pop { display: block; }
+.bs-desc-wrap:focus-within .bs-desc-pop { display: none; }
+
+.bs-framecell { width: 128px; }
+.bs-frames { display: flex; flex-direction: column; gap: 2px; }
+.bs-tcrow { display: flex; align-items: center; gap: 5px; }
+.bs-tcrow span { font-family: ui-monospace, Menlo, monospace; font-size: 9px; text-transform: uppercase; color: #565C66; width: 18px; text-align: right; }
+.bs-frames input { background: #1D2025; border: 1px solid #2A2E35; border-radius: 3px; color: #6B7280; width: 92px; padding: 3px 5px; text-align: right; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.bs-frames input:hover { border-color: #3A3F48; }
+.bs-frames input:focus { color: #DDE1E6; }
+.bs-frames input::placeholder { color: #40454E; }
+.bs-tc { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: #6B7280; white-space: nowrap; }
+.bs-sub-frames { text-align: right; }
+
+.bs-qtycell { width: 56px; }
+.bs-qtycell input { background: #1D2025; border: 1px solid #2A2E35; border-radius: 3px; color: #8B919C; width: 46px; padding: 5px 5px; text-align: right; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.bs-qtycell input.hot { color: #E8A33D; border-color: #E8A33D55; }
+
+.bs-tagcell { min-width: 120px; max-width: 180px; }
+.bs-tags { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.bs-tag { display: inline-flex; align-items: center; gap: 3px; background: #23262C; border: 1px solid #33383F; border-radius: 99px; padding: 2px 8px; font-size: 11px; color: #A8AEB8; }
+.bs-tag button { background: none; border: none; color: #565C66; cursor: pointer; padding: 0; font-size: 12px; }
+.bs-tag button:hover { color: #D96B5B; }
+.bs-tags > input { background: none; border: none; color: #DDE1E6; font-size: 11px; width: 48px; padding: 2px 0; }
+
+.bs-statuscell { width: 92px; }
+.bs-statuscell select { background: #1D2025; border: 1px solid #2A2E35; border-radius: 3px; padding: 4px 4px; font-size: 11px; cursor: pointer; width: 86px; }
+.bs-multcell { width: 64px; }
+.bs-multcell select { background: #1D2025; border: 1px solid #2A2E35; border-radius: 3px; color: #8B919C; padding: 4px 4px; font-size: 11px; cursor: pointer; width: 58px; font-family: ui-monospace, Menlo, monospace; }
+.bs-multcell select.hot { color: #E8A33D; border-color: #E8A33D55; }
+
+.bs-days { text-align: right; width: 90px; }
+.bs-days input { background: #1D2025; border: 1px solid #2A2E35; border-radius: 3px; color: #DDE1E6; width: 56px; padding: 6px 6px; text-align: right; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+.bs-days input::placeholder { color: #40454E; }
+.bs-days input:hover { border-color: #3A3F48; }
+.bs-foot-num { font-family: ui-monospace, Menlo, monospace; padding-right: 16px; font-weight: 600; }
+
+.bs-total { text-align: right; font-family: ui-monospace, Menlo, monospace; font-weight: 700; color: #F2F4F7; }
+.bs-cost { text-align: right; font-family: ui-monospace, Menlo, monospace; color: #E8A33D; white-space: nowrap; }
+.bs-rowactions { white-space: nowrap; width: 60px; }
+.bs-rowactions button { background: none; border: none; color: #565C66; cursor: pointer; font-size: 14px; padding: 2px 4px; }
+.bs-rowactions button:hover { color: #E8A33D; }
+.bs-rowactions button:last-child:hover { color: #D96B5B; }
+
+.bs-subtotal { background: #1B1E23; border-top: 2px solid #2A2E35; border-bottom: 2px solid #2A2E35; }
+.bs-sub-label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8B919C; text-align: right; }
+
+/* summary bar */
+.bs-summary { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 24px; align-items: baseline; padding: 12px 24px calc(12px + env(safe-area-inset-bottom)); background: #14161Aee; border-top: 1px solid #2A2E35; backdrop-filter: blur(6px); flex-wrap: wrap; z-index: 10; }
+.bs-sum-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #6B7280; margin-right: 8px; }
+.bs-sum-val { font-family: ui-monospace, Menlo, monospace; font-size: 16px; font-weight: 700; color: #F2F4F7; }
+.bs-sum-unit { font-size: 11px; color: #6B7280; margin-left: 2px; }
+.bs-sum-tc { font-size: 13px; color: #A8AEB8; }
+.bs-sum-sub { color: #A8AEB8; font-size: 14px; }
+.bs-sum-cost { color: #E8A33D; }
+.bs-sum-awarded { color: #8FBF6B; }
+.bs-cont { display: flex; align-items: baseline; gap: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #A8AEB8; }
+.bs-cont input { background: #1D2025; border: 1px solid #2A2E35; border-radius: 3px; color: #DDE1E6; width: 44px; padding: 3px 5px; text-align: right; font-family: inherit; font-size: 12px; }
+.bs-cont-amt { color: #6B7280; margin-left: 4px; }
+
+@media (prefers-reduced-motion: reduce) { .bs-root * { transition: none !important; } }
+@media (max-width: 720px) {
+  .bs-summary { gap: 8px 16px; padding: 8px 14px calc(8px + env(safe-area-inset-bottom)); }
+  .bs-sum-label { margin-right: 4px; }
+  .bs-sum-val { font-size: 13px; }
+  .bs-sum-tc { font-size: 11px; }
+  .bs-head, .bs-toolbar, .bs-filter { padding-left: 14px; padding-right: 14px; }
+  .bs-scroll { padding: 0 14px; }
+}
+`;
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<BidSheet />);
+</script>
+</body>
+</html>
