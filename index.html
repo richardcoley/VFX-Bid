@@ -80,16 +80,31 @@ const SHOT_COLORS = ["#5B9BD5", "#E8A33D", "#8FBF6B", "#C97BB8", "#D96B5B", "#6B
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 const DEFAULT_ASSET_DISCS = [
-  { id: "a1", name: "Model", rate: 450 },
-  { id: "a2", name: "Texture / Lookdev", rate: 450 },
-  { id: "a3", name: "Rig", rate: 475 },
+  { id: "a_design", name: "DESIGN", rate: 450 },
+  { id: "a_model", name: "MODEL", rate: 450 },
+  { id: "a_lookdev", name: "LOOKDEV", rate: 450 },
+  { id: "a_rig", name: "RIG", rate: 450 },
+  { id: "a_cfx", name: "CFX", rate: 450 },
+  { id: "a_rnd", name: "RND", rate: 450 },
 ];
 const DEFAULT_SHOT_DISCS = [
-  { id: "d1", name: "Roto / Prep", rate: 350 },
-  { id: "d2", name: "Comp", rate: 450 },
-  { id: "d3", name: "CG / Lighting", rate: 500 },
-  { id: "d4", name: "FX", rate: 500 },
-  { id: "d5", name: "DMP", rate: 450 },
+  { id: "s_concept", name: "CONCEPT", rate: 450 },
+  { id: "s_previs", name: "PREVIS", rate: 450 },
+  { id: "s_matchmove", name: "MATCHMOVE", rate: 450 },
+  { id: "s_layout", name: "LAYOUT", rate: 450 },
+  { id: "s_anim", name: "ANIM", rate: 450 },
+  { id: "s_fx", name: "FX", rate: 450 },
+  { id: "s_lr", name: "L & R", rate: 450 },
+  { id: "s_comp", name: "COMP", rate: 450 },
+  { id: "s_cleanup", name: "CLEAN UP", rate: 450 },
+  { id: "s_roto", name: "ROTO", rate: 450 },
+];
+
+const DEFAULT_META = [
+  { id: uid(), label: "VFX Supervisor", value: "" },
+  { id: uid(), label: "Producer", value: "" },
+  { id: uid(), label: "Director", value: "" },
+  { id: uid(), label: "Delivery date", value: "" },
 ];
 
 const newRow = (kind, code) => ({
@@ -97,15 +112,8 @@ const newRow = (kind, code) => ({
   frames: 0, tcIn: 0, status: "bid", mult: 1, qty: 1,
 });
 
-const DEFAULT_ASSETS = [
-  { ...newRow("asset", "AST_VEHICLE"), desc: "Hero vehicle — model, texture, lookdev", tags: ["cg", "hero"], days: { a1: 6, a2: 5, a3: 3 } },
-  { ...newRow("asset", "AST_ENV_STREET"), desc: "Street environment extension", tags: ["cg", "env"], days: { a1: 8, a2: 4 } },
-];
-const DEFAULT_SHOTS = [
-  { ...newRow("shot", "SH_010"), desc: "Establishing wide, sky replacement", tags: ["ext", "2d"], days: { d1: 1, d2: 3, d5: 2 }, frames: 120, tcIn: 90000 },
-  { ...newRow("shot", "SH_020"), desc: "Hero vehicle CG integration", tags: ["cg", "hero"], days: { d1: 2, d2: 4, d3: 6, d4: 3 }, frames: 96, tcIn: 90150, mult: 1.5 },
-  { ...newRow("shot", "SH_030"), desc: "Crowd tiling, plate cleanup", tags: ["2d", "crowd"], days: { d1: 3, d2: 3 }, frames: 150, tcIn: 90275 },
-];
+const DEFAULT_ASSETS = [];
+const DEFAULT_SHOTS = [];
 
 const INDEX_KEY = "vfx-bid:index";
 const PROJ_KEY = (id) => `vfx-bid:proj:${id}`;
@@ -153,8 +161,9 @@ const csvEsc = (v) => {
 // ==================================================================
 
 function BidSheet() {
-  const [project, setProject] = useState("UNTITLED PROJECT");
+  const [project, setProject] = useState("VFX - Bid - Template");
   const [client, setClient] = useState("Client / Agency");
+  const [meta, setMeta] = useState(DEFAULT_META);
   const [fps, setFps] = useState(25);
   const [contingency, setContingency] = useState(10);
   const [supPct, setSupPct] = useState(15);
@@ -165,7 +174,7 @@ function BidSheet() {
   const [shotDiscs, setShotDiscs] = useState(DEFAULT_SHOT_DISCS);
   const [assets, setAssets] = useState(DEFAULT_ASSETS);
   const [shots, setShots] = useState(DEFAULT_SHOTS);
-  const [showRates, setShowRates] = useState(true);
+  const [showRates, setShowRates] = useState(false);
   const [filterTags, setFilterTags] = useState([]);
   const [status, setStatus] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -190,12 +199,13 @@ function BidSheet() {
   const flash = (msg) => { setStatus(msg); setTimeout(() => setStatus(""), 1800); };
 
   // ---------- state <-> snapshot ----------
-  const snapshot = () => ({ version: 4, project, client, fps, contingency, supPct, assumptions, assetDiscs, shotDiscs, assets, shots, showRates });
+  const snapshot = () => ({ version: 5, project, client, meta, fps, contingency, supPct, assumptions, assetDiscs, shotDiscs, assets, shots, showRates });
 
   const applyState = (s) => {
     if (!s) return;
-    setProject(s.project ?? "UNTITLED PROJECT");
+    setProject(s.project ?? "VFX - Bid - Template");
     setClient(s.client ?? "");
+    setMeta(s.meta ?? DEFAULT_META.map(m => ({ ...m, id: uid() })));
     setFps(s.fps ?? 25);
     setContingency(s.contingency ?? 10);
     setSupPct(s.supPct ?? 15);
@@ -278,7 +288,7 @@ function BidSheet() {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => persist("Autosaved"), 900);
     return () => clearTimeout(saveTimer.current);
-  }, [project, client, fps, contingency, supPct, assumptions, assetDiscs, shotDiscs, assets, shots, showRates, loaded, currentId]);
+  }, [project, client, meta, fps, contingency, supPct, assumptions, assetDiscs, shotDiscs, assets, shots, showRates, loaded, currentId]);
 
   const switchProject = async (id) => {
     if (id === currentId) return;
@@ -298,9 +308,9 @@ function BidSheet() {
     await persist();
     const id = uid();
     const fresh = {
-      version: 4, project: "NEW BID", client: "", fps: 25, contingency: 10, supPct: 15, assumptions: "",
+      version: 5, project: "NEW BID", client: "", meta: DEFAULT_META.map(m => ({ ...m, id: uid() })), fps: 25, contingency: 10, supPct: 15, assumptions: "",
       assetDiscs: DEFAULT_ASSET_DISCS, shotDiscs: DEFAULT_SHOT_DISCS,
-      assets: [], shots: [], showRates: true,
+      assets: [], shots: [], showRates: false,
     };
     const index = [...projIndex, { id, name: "NEW BID" }];
     try {
@@ -335,7 +345,7 @@ function BidSheet() {
       await window.storage.delete(PROJ_KEY(currentId));
       if (index.length === 0) {
         const id = uid();
-        const fresh = { version: 4, project: "UNTITLED PROJECT", client: "", fps: 25, contingency: 10, supPct: 15, assumptions: "", assetDiscs: DEFAULT_ASSET_DISCS, shotDiscs: DEFAULT_SHOT_DISCS, assets: [], shots: [], showRates: true };
+        const fresh = { version: 5, project: "VFX - Bid - Template", client: "", meta: DEFAULT_META.map(m => ({ ...m, id: uid() })), fps: 25, contingency: 10, supPct: 15, assumptions: "", assetDiscs: DEFAULT_ASSET_DISCS, shotDiscs: DEFAULT_SHOT_DISCS, assets: [], shots: [], showRates: false };
         await window.storage.set(PROJ_KEY(id), JSON.stringify(fresh));
         await window.storage.set(INDEX_KEY, JSON.stringify([{ id, name: fresh.project }]));
         setProjIndex([{ id, name: fresh.project }]);
@@ -410,6 +420,7 @@ function BidSheet() {
       lines.push("");
     };
     lines.push(csvEsc(project) + "," + csvEsc(client));
+    meta.filter(m => m.value.trim()).forEach(m => lines.push(csvEsc(m.label) + "," + csvEsc(m.value)));
     lines.push("");
     block("ASSETS", assets, assetDiscs, false);
     block("SHOTS", shots, shotDiscs, true);
@@ -482,6 +493,8 @@ function BidSheet() {
   .totals { margin-top: 28px; margin-left: auto; width: 320px; }
   .totals td { padding: 6px 8px; }
   .totals .grand td { font-size: 16px; font-weight: 700; border-top: 2px solid #1a1d21; border-bottom: none; }
+  .credits { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0 0 24px; font-size: 12px; }
+  .credits span { display: block; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #9ca3af; }
   .assumptions { margin-top: 32px; padding: 14px 16px; background: #f6f7f8; border-radius: 4px; }
   .assumptions h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; color: #6b7280; }
   .assumptions p { margin: 0; white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
@@ -489,6 +502,7 @@ function BidSheet() {
   @media print { body { margin: 0 auto; } }
 </style></head><body>
 <header><h1>${esc(project)}</h1><div class="meta">${esc(client)} &nbsp;·&nbsp; VFX bid &nbsp;·&nbsp; ${new Date().toLocaleDateString("en-GB")}</div></header>
+${meta.filter(m => m.value.trim()).length ? `<div class="credits">${meta.filter(m => m.value.trim()).map(m => `<div><span>${esc(m.label)}</span>${esc(m.value)}</div>`).join("")}</div>` : ""}
 ${secHTML("Assets", assets, assetDiscs, false)}
 ${secHTML("Shots", shots, shotDiscs, true)}
 <table class="totals">
@@ -567,38 +581,8 @@ ${assumptions.trim() ? `<div class="assumptions"><h3>Assumptions &amp; exclusion
       <style>{CSS}</style>
       <input ref={importRef} type="file" accept=".json" style={{ display: "none" }} onChange={importJSON} />
 
-      {/* header */}
-      <header className="bs-head">
-        <div className="bs-slate">
-          <span className="bs-slate-dot" />
-          <span className="bs-slate-label">BID SHEET</span>
-        </div>
-        <div className="bs-titles">
-          <input className="bs-project" value={project} onChange={e => setProject(e.target.value)} spellCheck={false} />
-          <input className="bs-client" value={client} onChange={e => setClient(e.target.value)} spellCheck={false} />
-        </div>
-        <span className="bs-status">{status}</span>
-      </header>
-
       {/* toolbar */}
       <div className="bs-toolbar">
-        <div className="bs-group">
-          <span className="bs-group-label">Bid</span>
-          <select value={currentId ?? ""} onChange={e => switchProject(e.target.value)} title="Saved bids">
-            {projIndex.map(p => <option key={p.id} value={p.id}>{p.id === currentId ? project : p.name}</option>)}
-          </select>
-          <button onClick={newProject} title="New bid">+</button>
-          <button onClick={duplicateProject} title="Duplicate this bid">⧉</button>
-          <button className={confirmDel ? "bs-danger" : ""} onClick={deleteProject}
-                  onBlur={() => setConfirmDel(false)} title="Delete this bid">
-            {confirmDel ? "Delete?" : "×"}
-          </button>
-        </div>
-        <div className="bs-group">
-          <select value={fps} onChange={e => setFps(parseFloat(e.target.value))} title="Project frame rate">
-            {[23.976, 24, 25, 30, 50, 60].map(f => <option key={f} value={f}>{f} fps</option>)}
-          </select>
-        </div>
         <div className="bs-menu-wrap">
           <div className="bs-group">
             <button onClick={() => setMenuOpen(!menuOpen)} aria-expanded={menuOpen}>File ▾</button>
@@ -618,8 +602,52 @@ ${assumptions.trim() ? `<div class="assumptions"><h3>Assumptions &amp; exclusion
           </>}
         </div>
         <div className="bs-group">
+          <span className="bs-group-label">Bid</span>
+          <select value={currentId ?? ""} onChange={e => switchProject(e.target.value)} title="Saved bids">
+            {projIndex.map(p => <option key={p.id} value={p.id}>{p.id === currentId ? project : p.name}</option>)}
+          </select>
+          <button onClick={newProject} title="New bid">+</button>
+          <button onClick={duplicateProject} title="Duplicate this bid">⧉</button>
+          <button className={confirmDel ? "bs-danger" : ""} onClick={deleteProject}
+                  onBlur={() => setConfirmDel(false)} title="Delete this bid">
+            {confirmDel ? "Delete?" : "×"}
+          </button>
+        </div>
+        <div className="bs-group">
+          <select value={fps} onChange={e => setFps(parseFloat(e.target.value))} title="Project frame rate">
+            {[23.976, 24, 25, 30, 50, 60].map(f => <option key={f} value={f}>{f} fps</option>)}
+          </select>
+        </div>
+        <div className="bs-group">
           <button onClick={() => setShowRates(!showRates)}>{showRates ? "Hide costs" : "Show costs"}</button>
         </div>
+        <span className="bs-status">{status}</span>
+      </div>
+
+      {/* project card */}
+      <div className="bs-projcard">
+        <div className="bs-field bs-field-wide">
+          <label>Project</label>
+          <input className="bs-project" value={project} onChange={e => setProject(e.target.value)} spellCheck={false} />
+        </div>
+        <div className="bs-field bs-field-wide">
+          <label>Client / Agency</label>
+          <input value={client} onChange={e => setClient(e.target.value)} spellCheck={false} />
+        </div>
+        {meta.map(m => (
+          <div className="bs-field" key={m.id}>
+            <label>
+              <input className="bs-field-label" value={m.label} spellCheck={false}
+                     onChange={e => setMeta(meta.map(x => x.id === m.id ? { ...x, label: e.target.value } : x))} />
+              <button className="bs-field-x" title="Remove field"
+                      onClick={() => setMeta(meta.filter(x => x.id !== m.id))}>×</button>
+            </label>
+            <input value={m.value} placeholder="—" spellCheck={false}
+                   onChange={e => setMeta(meta.map(x => x.id === m.id ? { ...x, value: e.target.value } : x))} />
+          </div>
+        ))}
+        <button className="bs-field-add" title="Add a custom field"
+                onClick={() => setMeta([...meta, { id: uid(), label: "New field", value: "" }])}>+ Field</button>
       </div>
 
       {/* tag filter strip */}
@@ -920,8 +948,9 @@ function Section({ label, kind, codePrefix, rows, setRows, discs, setDiscs, colo
                   onDrop={() => onColDrop(d.id)}
                   onDragEnd={reset}
                   style={{ borderTop: `3px solid ${discColor(i)}` }}>
-                <div className="bs-disc-name" onClick={() => setSort(d.id)} title="Click to sort, drag to reorder">
+                <div className="bs-disc-name" onClick={() => setSort(d.id)} title={d.name + " — click to sort, drag to reorder"}>
                   <input value={d.name}
+                         style={{ width: Math.min(22, Math.max(7, d.name.length + 1)) + "ch" }}
                          onClick={e => e.stopPropagation()}
                          onChange={e => updateDisc(d.id, { name: e.target.value })}
                          spellCheck={false} />
@@ -1123,37 +1152,45 @@ const CSS = `
 .bs-root input:focus-visible, .bs-root button:focus-visible, .bs-root select:focus-visible { outline: 2px solid #E8A33D; outline-offset: 1px; }
 .bs-loading { padding: 48px; font-family: ui-monospace, Menlo, monospace; color: #6B7280; letter-spacing: 2px; }
 
-/* header */
-.bs-head { display: flex; align-items: center; gap: 16px; padding: 16px 24px 12px; flex-wrap: wrap; }
-.bs-slate { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid #3A3F48; border-radius: 3px; background: #14161A; }
-.bs-slate-dot { width: 8px; height: 8px; border-radius: 50%; background: #E8A33D; box-shadow: 0 0 8px #E8A33D88; }
-.bs-slate-label { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 3px; font-size: 11px; color: #E8A33D; }
-.bs-titles { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 200px; }
-.bs-project { background: none; border: none; color: #F2F4F7; font-size: 20px; font-weight: 700; letter-spacing: 1px; padding: 0; width: 100%; }
-.bs-client { background: none; border: none; color: #8B919C; font-size: 12px; padding: 0; width: 100%; }
-.bs-status { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #8FBF6B; min-width: 70px; text-align: right; }
-
 /* toolbar */
-.bs-toolbar { display: flex; align-items: stretch; gap: 10px; padding: 0 24px 12px; flex-wrap: wrap; border-bottom: 1px solid #2A2E35; }
-.bs-group { display: flex; align-items: center; background: #1D2025; border: 1px solid #2A2E35; border-radius: 4px; overflow: hidden; }
+.bs-toolbar { display: flex; align-items: center; gap: 10px; padding: 14px 24px; flex-wrap: wrap; border-bottom: 1px solid #2A2E35; }
+.bs-group { display: flex; align-items: center; background: #1D2025; border: 1px solid #2A2E35; border-radius: 3px; overflow: hidden; }
 .bs-group-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #6B7280; padding: 0 8px 0 10px; }
 .bs-group select { background: none; border: none; color: #DDE1E6; padding: 7px 6px; font-size: 12px; max-width: 150px; cursor: pointer; }
 .bs-group button { background: none; border: none; border-left: 1px solid #2A2E35; color: #A8AEB8; padding: 7px 11px; cursor: pointer; font-size: 12px; }
 .bs-group button:first-child { border-left: none; }
 .bs-group button:hover { color: #E8A33D; background: #23262C; }
 .bs-group button.bs-danger { background: #D96B5B; color: #191B1F; font-weight: 600; }
+.bs-status { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #8FBF6B; margin-left: auto; }
+
+/* project card */
+.bs-projcard { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; padding: 18px 24px 22px; background: #1B1E23; border-bottom: 1px solid #2A2E35; }
+.bs-field { display: flex; flex-direction: column; gap: 3px; min-width: 150px; }
+.bs-field-wide { flex: 1; min-width: 220px; }
+.bs-field label { display: flex; align-items: center; gap: 2px; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #6B7280; }
+.bs-field > input { background: #14161A; border: 1px solid #2A2E35; border-radius: 3px; color: #DDE1E6; padding: 7px 9px; font-size: 13px; width: 100%; }
+.bs-field > input:hover { border-color: #3A3F48; }
+.bs-field > input::placeholder { color: #40454E; }
+.bs-field input.bs-project { color: #F2F4F7; font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
+.bs-field-label { background: none; border: none; color: #6B7280; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; padding: 0; width: 100%; font-family: inherit; }
+.bs-field-label:hover { color: #A8AEB8; }
+.bs-field-x { background: none; border: none; color: #40454E; cursor: pointer; font-size: 12px; padding: 0 2px; opacity: 0; }
+.bs-field:hover .bs-field-x { opacity: 1; }
+.bs-field-x:hover { color: #D96B5B; }
+.bs-field-add { align-self: flex-end; background: none; border: 1px dashed #3A3F48; color: #8B919C; padding: 7px 12px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+.bs-field-add:hover { color: #E8A33D; border-color: #E8A33D; }
 
 /* file menu */
 .bs-menu-wrap { position: relative; }
 .bs-menu-backdrop { position: fixed; inset: 0; z-index: 40; }
-.bs-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; background: #23262C; border: 1px solid #3A3F48; border-radius: 4px; min-width: 240px; box-shadow: 0 8px 24px #000000AA; padding: 4px; display: flex; flex-direction: column; }
-.bs-menu button { background: none; border: none; color: #DDE1E6; padding: 8px 12px; text-align: left; cursor: pointer; font-size: 12px; border-radius: 3px; }
-.bs-menu button:hover { background: #2A2E35; color: #E8A33D; }
-.bs-menu-div { height: 1px; background: #33383F; margin: 4px 8px; }
+.bs-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 50; background: #1D2025; border: 1px solid #3A3F48; border-radius: 3px; min-width: 240px; padding: 0; display: flex; flex-direction: column; }
+.bs-menu button { background: none; border: none; color: #DDE1E6; padding: 9px 14px; text-align: left; cursor: pointer; font-size: 12px; border-radius: 0; }
+.bs-menu button:hover { background: #23262C; color: #E8A33D; }
+.bs-menu-div { height: 1px; background: #2A2E35; }
 
 /* modal */
-.bs-modal-backdrop { position: fixed; inset: 0; background: #000000AA; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 16px; }
-.bs-modal { background: #1E2128; border: 1px solid #3A3F48; border-radius: 6px; padding: 18px; width: 100%; max-width: 420px; box-shadow: 0 12px 40px #000000CC; }
+.bs-modal-backdrop { position: fixed; inset: 0; background: #0E1014CC; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.bs-modal { background: #1E2128; border: 1px solid #3A3F48; border-radius: 6px; padding: 18px; width: 100%; max-width: 420px; }
 .bs-modal h3 { margin: 0 0 4px; font-size: 14px; color: #F2F4F7; }
 .bs-modal p { margin: 0 0 12px; font-size: 12px; color: #8B919C; }
 .bs-modal-target { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 11px; color: #6B7280; text-transform: uppercase; letter-spacing: 1px; }
@@ -1171,7 +1208,7 @@ const CSS = `
 .bs-assump:focus { border-color: #3A3F48; }
 
 /* filter strip */
-.bs-filter { display: flex; align-items: center; gap: 8px; padding: 12px 24px; flex-wrap: wrap; border-bottom: 1px solid #22252B; }
+.bs-filter { display: flex; align-items: center; gap: 8px; padding: 14px 24px; flex-wrap: wrap; border-bottom: 1px solid #22252B; }
 .bs-filter-label { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: #6B7280; margin-right: 4px; }
 .bs-filter-empty { color: #565C66; font-size: 12px; }
 .bs-tagchip { background: #1F2228; border: 1px solid #33383F; color: #A8AEB8; padding: 4px 12px; border-radius: 99px; cursor: pointer; font-size: 12px; }
@@ -1179,7 +1216,7 @@ const CSS = `
 .bs-clear { background: none; border: none; color: #E8A33D; cursor: pointer; font-size: 12px; text-decoration: underline; }
 
 /* section bars */
-.bs-section-bar { display: flex; align-items: center; gap: 12px; padding: 16px 0 8px; }
+.bs-section-bar { display: flex; align-items: center; gap: 12px; padding: 28px 0 10px; }
 .bs-chev { background: none; border: 1px solid #2A2E35; border-radius: 3px; color: #8B919C; width: 24px; height: 24px; cursor: pointer; font-size: 11px; line-height: 1; }
 .bs-chev:hover { color: #E8A33D; border-color: #E8A33D; }
 .bs-section-label { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700; letter-spacing: 3px; color: #E8A33D; cursor: pointer; user-select: none; }
@@ -1198,7 +1235,7 @@ const CSS = `
 .bs-th-disc { cursor: grab; min-width: 92px; background: #1D2025; text-align: center; }
 .bs-th-disc.over { background: #2A2E35; }
 .bs-th-disc .bs-disc-name { display: flex; align-items: center; justify-content: center; cursor: pointer; }
-.bs-th-disc input { background: none; border: none; color: #DDE1E6; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; width: 100%; padding: 0; cursor: text; text-align: center; }
+.bs-th-disc input { background: none; border: none; color: #DDE1E6; font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; padding: 0; cursor: text; text-align: center; min-width: 0; }
 .bs-glyph { color: #E8A33D; }
 .bs-rate { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: #6B7280; text-transform: none; letter-spacing: 0; margin-top: 3px; text-align: center; }
 .bs-rate input { background: none; border: none; border-bottom: 1px dotted #3A3F48; color: #A8AEB8; width: 42px; font-size: 10px; padding: 0; font-family: inherit; }
@@ -1233,7 +1270,7 @@ const CSS = `
   background: #23262C; border: 1px solid #3A3F48; border-radius: 4px;
   padding: 8px 10px; width: max-content; max-width: 340px;
   color: #DDE1E6; font-size: 12px; line-height: 1.45; white-space: normal;
-  box-shadow: 0 6px 18px #00000088; pointer-events: none;
+  pointer-events: none;
 }
 .bs-desc-wrap:hover .bs-desc-pop { display: block; }
 .bs-desc-wrap:focus-within .bs-desc-pop { display: none; }
@@ -1283,7 +1320,7 @@ const CSS = `
 .bs-sub-label { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8B919C; text-align: right; }
 
 /* summary bar */
-.bs-summary { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 24px; align-items: baseline; padding: 12px 24px calc(12px + env(safe-area-inset-bottom)); background: #14161Aee; border-top: 1px solid #2A2E35; backdrop-filter: blur(6px); flex-wrap: wrap; z-index: 10; }
+.bs-summary { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 24px; align-items: baseline; padding: 12px 24px calc(12px + env(safe-area-inset-bottom)); background: #16181D; border-top: 1px solid #2A2E35; flex-wrap: wrap; z-index: 10; }
 .bs-sum-label { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #6B7280; margin-right: 8px; }
 .bs-sum-val { font-family: ui-monospace, Menlo, monospace; font-size: 16px; font-weight: 700; color: #F2F4F7; }
 .bs-sum-unit { font-size: 11px; color: #6B7280; margin-left: 2px; }
@@ -1301,7 +1338,7 @@ const CSS = `
   .bs-sum-label { margin-right: 4px; }
   .bs-sum-val { font-size: 13px; }
   .bs-sum-tc { font-size: 11px; }
-  .bs-head, .bs-toolbar, .bs-filter { padding-left: 14px; padding-right: 14px; }
+  .bs-toolbar, .bs-filter, .bs-projcard { padding-left: 14px; padding-right: 14px; }
   .bs-scroll { padding: 0 14px; }
 }
 `;
