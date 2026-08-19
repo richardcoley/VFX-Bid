@@ -1269,7 +1269,7 @@ const CSS = `
   font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase;
   font-family: inherit; font-weight: normal; padding: 0 4px; white-space: pre;
 }
-.bs-disc-ghost { visibility: hidden; display: block; height: 0; overflow: hidden; }
+.bs-disc-ghost { visibility: hidden; display: block; white-space: pre; }
 .bs-th-disc input { position: absolute; inset: 0; width: 100%; background: none; border: none; color: var(--text); cursor: text; text-align: center; }
 .bs-glyph { color: var(--accent); }
 .bs-rate { font-family: ui-monospace, Menlo, monospace; font-size: 10px; color: var(--text-muted); text-transform: none; letter-spacing: 0; margin-top: 3px; text-align: center; }
